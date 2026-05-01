@@ -27,7 +27,7 @@ namespace banaData
 
         private ComboBox _sourceSchemaComboBox = null!;
         private ComboBox _targetSchemaComboBox = null!;
-        private ComboBox _tableComboBox = null!;
+        private CheckedListBox _tableCheckedListBox = null!;
         private ComboBox _recordLimitComboBox = null!;
         private ComboBox _orderColumnComboBox = null!;
         private Button _transferButton = null!;
@@ -205,7 +205,13 @@ namespace banaData
 
             _sourceSchemaComboBox = CreateDropDown();
             _targetSchemaComboBox = CreateDropDown();
-            _tableComboBox = CreateDropDown();
+            _tableCheckedListBox = new CheckedListBox
+            {
+                Dock = DockStyle.Fill,
+                Height = 130,
+                CheckOnClick = true,
+                IntegralHeight = false
+            };
             _recordLimitComboBox = CreateDropDown();
             _orderColumnComboBox = CreateDropDown();
 
@@ -216,12 +222,12 @@ namespace banaData
 
             AddLabeledControl(layout, "Source schema", _sourceSchemaComboBox);
             AddLabeledControl(layout, "Target schema", _targetSchemaComboBox);
-            AddLabeledControl(layout, "Source table", _tableComboBox);
+            AddLabeledControl(layout, "Source tables", _tableCheckedListBox);
             AddLabeledControl(layout, "Record limit", _recordLimitComboBox);
             AddLabeledControl(layout, "Order column", _orderColumnComboBox);
 
             _sourceSchemaComboBox.SelectedIndexChanged += async (_, _) => await LoadSourceTablesAsync();
-            _tableComboBox.SelectedIndexChanged += async (_, _) => await LoadOrderColumnsAsync();
+            _tableCheckedListBox.ItemCheck += TableCheckedListBoxOnItemCheck;
             _recordLimitComboBox.SelectedIndexChanged += (_, _) => UpdateOrderColumnState();
             _targetSchemaComboBox.SelectedIndexChanged += (_, _) => UpdateTransferButtonState();
             _orderColumnComboBox.SelectedIndexChanged += (_, _) => UpdateTransferButtonState();
@@ -363,18 +369,13 @@ namespace banaData
 
             try
             {
-                _tableComboBox.Items.Clear();
+                _tableCheckedListBox.Items.Clear();
                 _orderColumnComboBox.Items.Clear();
 
                 var tables = await _metadataService.GetTablesAsync(settings, sourceSchema);
                 foreach (var table in tables)
                 {
-                    _tableComboBox.Items.Add(new ComboBoxItem<DatabaseObject>(table.Name, table));
-                }
-
-                if (_tableComboBox.Items.Count > 0)
-                {
-                    _tableComboBox.SelectedIndex = 0;
+                    _tableCheckedListBox.Items.Add(new ComboBoxItem<DatabaseObject>(table.Name, table), false);
                 }
 
                 AppendLog($"{sourceSchema} schema içinde {tables.Count} tablo bulundu.");
@@ -384,6 +385,7 @@ namespace banaData
                 AppendLog($"Tablo listesi okunamadı: {ex.Message}");
             }
 
+            await LoadOrderColumnsAsync();
             UpdateTransferButtonState();
         }
 
@@ -391,9 +393,20 @@ namespace banaData
         {
             _orderColumnComboBox.Items.Clear();
 
+            var selectedTables = GetSelectedTables().ToArray();
+            if (selectedTables.Length != 1)
+            {
+                if (selectedTables.Length > 1)
+                {
+                    AppendLog("Birden fazla tablo seçili. 'Son kayıt' transferi yerine 'Tüm kayıtlar' seçmelisiniz.");
+                }
+
+                UpdateOrderColumnState();
+                return;
+            }
+
             if (!_sourceConnectionIsValid ||
                 _sourceSchemaComboBox.SelectedItem is not string sourceSchema ||
-                _tableComboBox.SelectedItem is not ComboBoxItem<DatabaseObject> selectedTable ||
                 !TryBuildConnectionSettings(true, out var settings))
             {
                 UpdateTransferButtonState();
@@ -402,7 +415,8 @@ namespace banaData
 
             try
             {
-                var columns = await _metadataService.GetColumnsAsync(settings, sourceSchema, selectedTable.Value.Name);
+                var selectedTable = selectedTables[0];
+                var columns = await _metadataService.GetColumnsAsync(settings, sourceSchema, selectedTable.Name);
                 var candidates = columns.Where(IsGoodOrderColumnCandidate).ToArray();
 
                 foreach (var column in candidates)
@@ -431,9 +445,18 @@ namespace banaData
             UpdateOrderColumnState();
         }
 
+        private void TableCheckedListBoxOnItemCheck(object? sender, ItemCheckEventArgs e)
+        {
+            BeginInvoke(async () =>
+            {
+                await LoadOrderColumnsAsync();
+                UpdateTransferButtonState();
+            });
+        }
+
         private async Task StartTransferAsync()
         {
-            if (!TryBuildTransferOptions(out var options))
+            if (!TryBuildTransferOptions(out var transferOptions))
             {
                 return;
             }
@@ -443,15 +466,37 @@ namespace banaData
             _transferButton.Enabled = false;
             _progressBar.Style = ProgressBarStyle.Marquee;
 
-            var progress = new Progress<TransferProgress>(ReportTransferProgress);
-            var result = await _transferService.TransferAsync(options, progress, _transferCancellationTokenSource.Token);
+            var overallSuccess = true;
+            foreach (var options in transferOptions)
+            {
+                AppendLog($"Tablo transferi başlıyor: {options.SourceSchema}.{options.TableName}");
+                var progress = new Progress<TransferProgress>(ReportTransferProgress);
+                var result = await _transferService.TransferAsync(options, progress, _transferCancellationTokenSource.Token);
+
+                if (!result.IsSuccess)
+                {
+                    overallSuccess = false;
+                    MessageBox.Show(
+                        $"{options.TableName} tablosunda hata oluştu: {result.Message}",
+                        "Transfer Hatası",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    break;
+                }
+            }
 
             _progressBar.Style = ProgressBarStyle.Blocks;
             _transferButton.Enabled = true;
+            UpdateTransferButtonState();
 
-            MessageBox.Show(result.Message, result.IsSuccess ? "Transfer" : "Transfer Hatası",
-                MessageBoxButtons.OK,
-                result.IsSuccess ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            if (overallSuccess)
+            {
+                MessageBox.Show(
+                    $"{transferOptions.Count} tablo için transfer tamamlandı.",
+                    "Transfer",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
         }
 
         private void ReportTransferProgress(TransferProgress progress)
@@ -463,9 +508,9 @@ namespace banaData
             AppendLog($"{progress.Message}{detail}");
         }
 
-        private bool TryBuildTransferOptions(out TransferOptions options)
+        private bool TryBuildTransferOptions(out List<TransferOptions> options)
         {
-            options = default!;
+            options = [];
 
             if (!TryBuildConnectionSettings(true, out var sourceConnection) ||
                 !TryBuildConnectionSettings(false, out var targetConnection))
@@ -475,10 +520,24 @@ namespace banaData
 
             if (_sourceSchemaComboBox.SelectedItem is not string sourceSchema ||
                 _targetSchemaComboBox.SelectedItem is not string targetSchema ||
-                _tableComboBox.SelectedItem is not ComboBoxItem<DatabaseObject> selectedTable ||
                 _recordLimitComboBox.SelectedItem is not ComboBoxItem<TransferRecordLimit> selectedLimit)
             {
-                MessageBox.Show("Source/target schema, tablo ve kayıt limiti seçilmelidir.", "Eksik Bilgi",
+                MessageBox.Show("Source/target schema ve kayıt limiti seçilmelidir.", "Eksik Bilgi",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            var selectedTables = GetSelectedTables().ToArray();
+            if (selectedTables.Length == 0)
+            {
+                MessageBox.Show("En az bir tablo seçmelisiniz.", "Eksik Bilgi",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            if (selectedTables.Length > 1 && selectedLimit.Value is not TransferRecordLimit.All)
+            {
+                MessageBox.Show("Birden fazla tablo seçildiğinde kayıt limiti yalnızca 'Tüm kayıtlar' olabilir.", "Seçim Uyuşmazlığı",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return false;
             }
@@ -496,14 +555,17 @@ namespace banaData
                 orderColumn = selectedOrderColumn.Value;
             }
 
-            options = new TransferOptions(
-                sourceConnection,
-                targetConnection,
-                sourceSchema,
-                targetSchema,
-                selectedTable.Value.Name,
-                selectedLimit.Value,
-                orderColumn);
+            foreach (var table in selectedTables)
+            {
+                options.Add(new TransferOptions(
+                    sourceConnection,
+                    targetConnection,
+                    sourceSchema,
+                    targetSchema,
+                    table.Name,
+                    selectedLimit.Value,
+                    orderColumn));
+            }
 
             return true;
         }
@@ -548,7 +610,7 @@ namespace banaData
         private void UpdateOrderColumnState()
         {
             var selectedLimit = _recordLimitComboBox.SelectedItem as ComboBoxItem<TransferRecordLimit>;
-            var requiresOrderColumn = selectedLimit?.Value is not TransferRecordLimit.All;
+            var requiresOrderColumn = selectedLimit?.Value is not TransferRecordLimit.All && GetSelectedTables().Count() == 1;
             _orderColumnComboBox.Enabled = requiresOrderColumn;
             UpdateTransferButtonState();
         }
@@ -568,9 +630,16 @@ namespace banaData
                 _targetConnectionIsValid &&
                 _sourceSchemaComboBox.SelectedItem is not null &&
                 _targetSchemaComboBox.SelectedItem is not null &&
-                _tableComboBox.SelectedItem is not null &&
+                GetSelectedTables().Any() &&
                 selectedLimit is not null &&
                 orderColumnIsReady;
+        }
+
+        private IEnumerable<DatabaseObject> GetSelectedTables()
+        {
+            return _tableCheckedListBox.CheckedItems
+                .OfType<ComboBoxItem<DatabaseObject>>()
+                .Select(item => item.Value);
         }
 
         private void AppendLog(string message)
