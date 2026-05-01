@@ -74,9 +74,9 @@ namespace banaData
                 Padding = new Padding(12)
             };
             rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 160));
             rootLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             var connectionLayout = new TableLayoutPanel
@@ -201,17 +201,14 @@ namespace banaData
             var groupBox = new GroupBox
             {
                 Text = "Transfer Selection",
-                Dock = DockStyle.Top,
-                AutoSize = false,
-                Height = 420,
+                Dock = DockStyle.Fill,
                 Padding = new Padding(10),
                 Margin = new Padding(0, 0, 0, 8)
             };
 
             var layout = new TableLayoutPanel
             {
-                Dock = DockStyle.Top,
-                AutoSize = true,
+                Dock = DockStyle.Fill,
                 ColumnCount = 2
             };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
@@ -284,6 +281,7 @@ namespace banaData
             AddLabeledControl(layout, "Target schema", _targetSchemaComboBox);
             AddLabeledControl(layout, "Record limit", _recordLimitComboBox);
             AddWideControl(layout, _selectionSplitContainer);
+            layout.RowStyles[layout.RowStyles.Count - 1] = new RowStyle(SizeType.Percent, 100);
 
             _sourceSchemaComboBox.SelectedIndexChanged += async (_, _) => await LoadSourceTablesAsync();
             _tableCheckedListBox.ItemCheck += TableCheckedListBoxOnItemCheck;
