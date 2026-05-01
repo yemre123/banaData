@@ -531,12 +531,20 @@ namespace banaData
                 {
                     var columns = await _metadataService.GetColumnsAsync(settings, sourceSchema, selectedTable.Name);
                     var candidates = columns.Where(IsGoodOrderColumnCandidate).ToArray();
+
+                    string? defaultOverride = null;
+                    if (candidates.Length == 0)
+                    {
+                        candidates = columns.Where(c => !c.IsComputed).ToArray();
+                        defaultOverride = SelectFallbackDefaultOrderColumn(candidates);
+                    }
+
                     _tableOrderCandidates[selectedTable.Name] = candidates;
-                    AddOrderRuleRow(selectedTable, candidates);
+                    AddOrderRuleRow(selectedTable, candidates, defaultOverride);
 
                     if (candidates.Length == 0)
                     {
-                        AppendLog($"Uyarı: {selectedTable.Name} tablosu için uygun sıralama kolonu bulunamadı.");
+                        AppendLog($"Uyarı: {selectedTable.Name} tablosunda sıralanabilecek kolon yok.");
                     }
                 }
             }
@@ -961,7 +969,7 @@ namespace banaData
                 .Select(item => item.Value);
         }
 
-        private void AddOrderRuleRow(DatabaseObject table, IReadOnlyList<ColumnMetadata> candidates)
+        private void AddOrderRuleRow(DatabaseObject table, IReadOnlyList<ColumnMetadata> candidates, string? defaultOverride = null)
         {
             var rowIndex = _tableOrderGrid.Rows.Add();
             var row = _tableOrderGrid.Rows[rowIndex];
@@ -973,7 +981,7 @@ namespace banaData
                 orderCell.Items.Add(candidate.Name);
             }
 
-            var defaultColumn = SelectDefaultOrderColumn(table.Name, candidates);
+            var defaultColumn = defaultOverride ?? SelectDefaultOrderColumn(table.Name, candidates);
             if (!string.IsNullOrWhiteSpace(defaultColumn))
             {
                 orderCell.Value = defaultColumn;
@@ -1021,6 +1029,19 @@ namespace banaData
                    column.SqlType.Equals("int", StringComparison.OrdinalIgnoreCase) ||
                    column.SqlType.Equals("smallint", StringComparison.OrdinalIgnoreCase) ||
                    column.SqlType.Equals("tinyint", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string? SelectFallbackDefaultOrderColumn(IReadOnlyList<ColumnMetadata> candidates)
+        {
+            if (candidates.Count == 0)
+            {
+                return null;
+            }
+
+            var idColumn = candidates.FirstOrDefault(c =>
+                c.Name.Equals("Id", StringComparison.OrdinalIgnoreCase));
+
+            return idColumn?.Name ?? candidates.OrderBy(c => c.Ordinal).First().Name;
         }
 
         private static string? SelectDefaultOrderColumn(string tableName, IReadOnlyList<ColumnMetadata> candidates)
