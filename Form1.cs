@@ -8,6 +8,7 @@ namespace banaData
         private readonly SqlConnectionService _connectionService = new();
         private readonly TableMetadataService _metadataService = new();
         private readonly DataTransferService _transferService;
+        private readonly ConnectionPreferencesService _preferencesService = new();
 
         private TextBox _sourceServerTextBox = null!;
         private TextBox _sourceDatabaseTextBox = null!;
@@ -30,6 +31,7 @@ namespace banaData
         private CheckedListBox _tableCheckedListBox = null!;
         private ComboBox _recordLimitComboBox = null!;
         private FlowLayoutPanel _tableOrderOptionsPanel = null!;
+        private Panel _tableOrderOptionsScrollPanel = null!;
         private Button _transferButton = null!;
         private ProgressBar _progressBar = null!;
         private TextBox _logTextBox = null!;
@@ -45,6 +47,13 @@ namespace banaData
 
             InitializeComponent();
             BuildUserInterface();
+            Load += async (_, _) => await LoadConnectionPreferencesAsync();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            SaveConnectionPreferences();
+            base.OnFormClosing(e);
         }
 
         private void BuildUserInterface()
@@ -190,7 +199,8 @@ namespace banaData
             {
                 Text = "Transfer Selection",
                 Dock = DockStyle.Top,
-                AutoSize = true,
+                AutoSize = false,
+                Height = 360,
                 Padding = new Padding(10),
                 Margin = new Padding(0, 0, 0, 8)
             };
@@ -216,11 +226,18 @@ namespace banaData
             _recordLimitComboBox = CreateDropDown();
             _tableOrderOptionsPanel = new FlowLayoutPanel
             {
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.Top,
                 AutoSize = true,
                 FlowDirection = FlowDirection.TopDown,
                 WrapContents = false
             };
+            _tableOrderOptionsScrollPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Height = 170,
+                AutoScroll = true
+            };
+            _tableOrderOptionsScrollPanel.Controls.Add(_tableOrderOptionsPanel);
 
             _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Son 1000 kayıt", TransferRecordLimit.Last1000));
             _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Son 5000 kayıt", TransferRecordLimit.Last5000));
@@ -231,7 +248,7 @@ namespace banaData
             AddLabeledControl(layout, "Target schema", _targetSchemaComboBox);
             AddLabeledControl(layout, "Source tables", _tableCheckedListBox);
             AddLabeledControl(layout, "Record limit", _recordLimitComboBox);
-            AddLabeledControl(layout, "Table order rules", _tableOrderOptionsPanel);
+            AddLabeledControl(layout, "Table order rules", _tableOrderOptionsScrollPanel);
 
             _sourceSchemaComboBox.SelectedIndexChanged += async (_, _) => await LoadSourceTablesAsync();
             _tableCheckedListBox.ItemCheck += TableCheckedListBoxOnItemCheck;
@@ -612,6 +629,63 @@ namespace banaData
                 EncryptConnection: true);
 
             return true;
+        }
+
+        private async Task LoadConnectionPreferencesAsync()
+        {
+            var preferences = await _preferencesService.LoadAsync();
+            if (preferences is null)
+            {
+                return;
+            }
+
+            ApplySavedConnection(preferences.Source, true);
+            ApplySavedConnection(preferences.Target, false);
+        }
+
+        private void SaveConnectionPreferences()
+        {
+            var preferences = new ConnectionPreferences(
+                BuildSavedConnection(true),
+                BuildSavedConnection(false));
+
+            try
+            {
+                _preferencesService.Save(preferences);
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"Bağlantı tercihleri kaydedilemedi: {ex.Message}");
+            }
+        }
+
+        private SavedConnection BuildSavedConnection(bool isSource)
+        {
+            return new SavedConnection(
+                (isSource ? _sourceServerTextBox : _targetServerTextBox).Text.Trim(),
+                (isSource ? _sourceDatabaseTextBox : _targetDatabaseTextBox).Text.Trim(),
+                (isSource ? _sourceIntegratedSecurityCheckBox : _targetIntegratedSecurityCheckBox).Checked,
+                (isSource ? _sourceUserNameTextBox : _targetUserNameTextBox).Text.Trim(),
+                (isSource ? _sourceTrustCertificateCheckBox : _targetTrustCertificateCheckBox).Checked);
+        }
+
+        private void ApplySavedConnection(SavedConnection saved, bool isSource)
+        {
+            var serverTextBox = isSource ? _sourceServerTextBox : _targetServerTextBox;
+            var databaseTextBox = isSource ? _sourceDatabaseTextBox : _targetDatabaseTextBox;
+            var integratedSecurityCheckBox = isSource ? _sourceIntegratedSecurityCheckBox : _targetIntegratedSecurityCheckBox;
+            var userNameTextBox = isSource ? _sourceUserNameTextBox : _targetUserNameTextBox;
+            var passwordTextBox = isSource ? _sourcePasswordTextBox : _targetPasswordTextBox;
+            var trustCertificateCheckBox = isSource ? _sourceTrustCertificateCheckBox : _targetTrustCertificateCheckBox;
+
+            serverTextBox.Text = saved.Server;
+            databaseTextBox.Text = saved.Database;
+            integratedSecurityCheckBox.Checked = saved.UseIntegratedSecurity;
+            userNameTextBox.Text = saved.UserName;
+            passwordTextBox.Text = string.Empty;
+            trustCertificateCheckBox.Checked = saved.TrustServerCertificate;
+            userNameTextBox.Enabled = !saved.UseIntegratedSecurity;
+            passwordTextBox.Enabled = !saved.UseIntegratedSecurity;
         }
 
         private void UpdateOrderColumnState()
