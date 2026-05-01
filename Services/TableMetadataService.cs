@@ -128,6 +128,26 @@ public sealed class TableMetadataService
         return columns;
     }
 
+    public async Task<long> GetRowCountAsync(
+        SqlConnectionSettings connectionSettings,
+        string schema,
+        string tableName,
+        CancellationToken cancellationToken = default)
+    {
+        var quoted = SqlIdentifier.QuoteFullName(schema, tableName);
+        var sql = $"SELECT COUNT_BIG(*) FROM {quoted};";
+
+        await using var connection = new SqlConnection(connectionSettings.BuildConnectionString());
+        await using var command = new SqlCommand(sql, connection)
+        {
+            CommandTimeout = 30
+        };
+
+        await connection.OpenAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is null or DBNull ? 0L : Convert.ToInt64(result);
+    }
+
     public async Task<bool> TableExistsAsync(
         SqlConnectionSettings connectionSettings,
         string schema,

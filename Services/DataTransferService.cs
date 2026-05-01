@@ -1,5 +1,6 @@
 using System.Data;
 using System.Globalization;
+using System.Text;
 using banaData.Models;
 using Microsoft.Data.SqlClient;
 
@@ -83,8 +84,9 @@ public sealed class DataTransferService
         catch (SqlException ex)
         {
             var message = GetFriendlySqlMessage(ex);
-            progress?.Report(new TransferProgress(message, rowsRead, rowsInserted, true));
-            return TransferResult.Failure(rowsRead, rowsInserted, message);
+            var detail = BuildExceptionDetail(ex);
+            progress?.Report(new TransferProgress(message, rowsRead, rowsInserted, true, detail));
+            return TransferResult.Failure(rowsRead, rowsInserted, message, detail);
         }
         catch (OperationCanceledException)
         {
@@ -95,9 +97,49 @@ public sealed class DataTransferService
         catch (Exception ex)
         {
             var message = $"Transfer sırasında beklenmeyen bir hata oluştu: {ex.Message}";
-            progress?.Report(new TransferProgress(message, rowsRead, rowsInserted, true));
-            return TransferResult.Failure(rowsRead, rowsInserted, message);
+            var detail = BuildExceptionDetail(ex);
+            progress?.Report(new TransferProgress(message, rowsRead, rowsInserted, true, detail));
+            return TransferResult.Failure(rowsRead, rowsInserted, message, detail);
         }
+    }
+
+    private static string BuildExceptionDetail(Exception ex)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Tip: {ex.GetType().FullName}");
+        sb.AppendLine($"Mesaj: {ex.Message}");
+
+        if (ex is SqlException sqlEx)
+        {
+            sb.AppendLine($"SQL Number: {sqlEx.Number}, State: {sqlEx.State}, Class: {sqlEx.Class}, Line: {sqlEx.LineNumber}");
+            if (!string.IsNullOrEmpty(sqlEx.Procedure))
+            {
+                sb.AppendLine($"Procedure: {sqlEx.Procedure}");
+            }
+            if (!string.IsNullOrEmpty(sqlEx.Server))
+            {
+                sb.AppendLine($"Server: {sqlEx.Server}");
+            }
+            foreach (SqlError err in sqlEx.Errors)
+            {
+                sb.AppendLine($"  - [{err.Number}] {err.Message}");
+            }
+        }
+
+        var inner = ex.InnerException;
+        while (inner is not null)
+        {
+            sb.AppendLine($"-> Inner ({inner.GetType().Name}): {inner.Message}");
+            inner = inner.InnerException;
+        }
+
+        if (!string.IsNullOrWhiteSpace(ex.StackTrace))
+        {
+            sb.AppendLine("Stack:");
+            sb.AppendLine(ex.StackTrace);
+        }
+
+        return sb.ToString().TrimEnd();
     }
 
     private async Task<ValidationResult> ValidateTransferAsync(TransferOptions options, CancellationToken cancellationToken)

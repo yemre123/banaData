@@ -79,13 +79,14 @@ public sealed record TransferProgress(
     string Message,
     int? RowsRead = null,
     int? RowsInserted = null,
-    bool IsError = false);
+    bool IsError = false,
+    string? Detail = null);
 
-public sealed record TransferResult(bool IsSuccess, int RowsRead, int RowsInserted, string Message)
+public sealed record TransferResult(bool IsSuccess, int RowsRead, int RowsInserted, string Message, string? Detail = null)
 {
     public static TransferResult Success(int rowsRead, int rowsInserted)
-        => new(true, rowsRead, rowsInserted, "Transfer tamamlandı.");
+        => new(true, rowsRead, rowsInserted, "Transfer tamamlandı.", null);
 
-    public static TransferResult Failure(int rowsRead, int rowsInserted, string message)
-        => new(false, rowsRead, rowsInserted, message);
+    public static TransferResult Failure(int rowsRead, int rowsInserted, string message, string? detail = null)
+        => new(false, rowsRead, rowsInserted, message, detail);
 }

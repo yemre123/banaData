@@ -30,15 +30,16 @@ namespace banaData
         private ComboBox _targetSchemaComboBox = null!;
         private CheckedListBox _tableCheckedListBox = null!;
         private ComboBox _recordLimitComboBox = null!;
-        private FlowLayoutPanel _tableOrderOptionsPanel = null!;
-        private Panel _tableOrderOptionsScrollPanel = null!;
+        private SplitContainer _selectionSplitContainer = null!;
+        private DataGridView _tableOrderGrid = null!;
         private Button _transferButton = null!;
         private ProgressBar _progressBar = null!;
         private TextBox _logTextBox = null!;
-        private readonly Dictionary<string, TableOrderSelection> _tableOrderSelections = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, IReadOnlyList<ColumnMetadata>> _tableOrderCandidates = new(StringComparer.OrdinalIgnoreCase);
 
         private bool _sourceConnectionIsValid;
         private bool _targetConnectionIsValid;
+        private bool _isLoadingSourceTables;
         private CancellationTokenSource? _transferCancellationTokenSource;
 
         public Form1()
@@ -48,6 +49,7 @@ namespace banaData
             InitializeComponent();
             BuildUserInterface();
             Load += async (_, _) => await LoadConnectionPreferencesAsync();
+            Shown += (_, _) => EnsureValidSplitterDistance();
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -200,7 +202,7 @@ namespace banaData
                 Text = "Transfer Selection",
                 Dock = DockStyle.Top,
                 AutoSize = false,
-                Height = 360,
+                Height = 420,
                 Padding = new Padding(10),
                 Margin = new Padding(0, 0, 0, 8)
             };
@@ -219,25 +221,37 @@ namespace banaData
             _tableCheckedListBox = new CheckedListBox
             {
                 Dock = DockStyle.Fill,
-                Height = 130,
                 CheckOnClick = true,
                 IntegralHeight = false
             };
             _recordLimitComboBox = CreateDropDown();
-            _tableOrderOptionsPanel = new FlowLayoutPanel
+            _selectionSplitContainer = new SplitContainer
             {
-                Dock = DockStyle.Top,
-                AutoSize = true,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false
+                Size = new Size(1000, 400),
+                Orientation = Orientation.Vertical,
+                Panel1MinSize = 220,
+                Panel2MinSize = 420,
+                SplitterDistance = 300,
+                Dock = DockStyle.Fill
             };
-            _tableOrderOptionsScrollPanel = new Panel
+            _selectionSplitContainer.Resize += (_, _) => EnsureValidSplitterDistance();
+
+            var sourceTablesGroup = new GroupBox
             {
-                Dock = DockStyle.Fill,
-                Height = 170,
-                AutoScroll = true
+                Text = "Source tables",
+                Dock = DockStyle.Fill
             };
-            _tableOrderOptionsScrollPanel.Controls.Add(_tableOrderOptionsPanel);
+            sourceTablesGroup.Controls.Add(_tableCheckedListBox);
+            _selectionSplitContainer.Panel1.Controls.Add(sourceTablesGroup);
+
+            var orderRulesGroup = new GroupBox
+            {
+                Text = "Table order rules",
+                Dock = DockStyle.Fill
+            };
+            _tableOrderGrid = CreateOrderRulesGrid();
+            orderRulesGroup.Controls.Add(_tableOrderGrid);
+            _selectionSplitContainer.Panel2.Controls.Add(orderRulesGroup);
 
             _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Son 1000 kayıt", TransferRecordLimit.Last1000));
             _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Son 5000 kayıt", TransferRecordLimit.Last5000));
@@ -246,9 +260,8 @@ namespace banaData
 
             AddLabeledControl(layout, "Source schema", _sourceSchemaComboBox);
             AddLabeledControl(layout, "Target schema", _targetSchemaComboBox);
-            AddLabeledControl(layout, "Source tables", _tableCheckedListBox);
             AddLabeledControl(layout, "Record limit", _recordLimitComboBox);
-            AddLabeledControl(layout, "Table order rules", _tableOrderOptionsScrollPanel);
+            AddWideControl(layout, _selectionSplitContainer);
 
             _sourceSchemaComboBox.SelectedIndexChanged += async (_, _) => await LoadSourceTablesAsync();
             _tableCheckedListBox.ItemCheck += TableCheckedListBoxOnItemCheck;
@@ -286,6 +299,53 @@ namespace banaData
             layout.Controls.Add(_transferButton);
             layout.Controls.Add(_progressBar);
             return layout;
+        }
+
+        private DataGridView CreateOrderRulesGrid()
+        {
+            var grid = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                MultiSelect = false,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
+            };
+
+            var tableColumn = new DataGridViewTextBoxColumn
+            {
+                Name = "TableName",
+                HeaderText = "Table",
+                FillWeight = 34,
+                ReadOnly = true
+            };
+
+            var orderColumn = new DataGridViewComboBoxColumn
+            {
+                Name = "OrderColumn",
+                HeaderText = "Order column",
+                FillWeight = 46,
+                FlatStyle = FlatStyle.Popup
+            };
+
+            var directionColumn = new DataGridViewComboBoxColumn
+            {
+                Name = "Direction",
+                HeaderText = "Direction",
+                FillWeight = 20,
+                FlatStyle = FlatStyle.Popup
+            };
+
+            grid.Columns.Add(tableColumn);
+            grid.Columns.Add(orderColumn);
+            grid.Columns.Add(directionColumn);
+            grid.CurrentCellDirtyStateChanged += (_, _) => UpdateTransferButtonState();
+            grid.CellValueChanged += (_, _) => UpdateTransferButtonState();
+
+            return grid;
         }
 
         private GroupBox CreateLogGroup()
@@ -380,6 +440,11 @@ namespace banaData
 
         private async Task LoadSourceTablesAsync()
         {
+            if (_isLoadingSourceTables)
+            {
+                return;
+            }
+
             if (!_sourceConnectionIsValid || _sourceSchemaComboBox.SelectedItem is not string sourceSchema)
             {
                 return;
@@ -390,11 +455,12 @@ namespace banaData
                 return;
             }
 
+            _isLoadingSourceTables = true;
             try
             {
                 _tableCheckedListBox.Items.Clear();
-                _tableOrderOptionsPanel.Controls.Clear();
-                _tableOrderSelections.Clear();
+                _tableOrderGrid.Rows.Clear();
+                _tableOrderCandidates.Clear();
 
                 var tables = await _metadataService.GetTablesAsync(settings, sourceSchema);
                 foreach (var table in tables)
@@ -408,6 +474,10 @@ namespace banaData
             {
                 AppendLog($"Tablo listesi okunamadı: {ex.Message}");
             }
+            finally
+            {
+                _isLoadingSourceTables = false;
+            }
 
             await RebuildTableOrderOptionsAsync();
             UpdateTransferButtonState();
@@ -415,8 +485,8 @@ namespace banaData
 
         private async Task RebuildTableOrderOptionsAsync()
         {
-            _tableOrderOptionsPanel.Controls.Clear();
-            _tableOrderSelections.Clear();
+            _tableOrderGrid.Rows.Clear();
+            _tableOrderCandidates.Clear();
 
             var selectedTables = GetSelectedTables().ToArray();
             if (selectedTables.Length == 0)
@@ -439,10 +509,8 @@ namespace banaData
                 {
                     var columns = await _metadataService.GetColumnsAsync(settings, sourceSchema, selectedTable.Name);
                     var candidates = columns.Where(IsGoodOrderColumnCandidate).ToArray();
-
-                    var row = CreateOrderSelectionRow(selectedTable, candidates);
-                    _tableOrderOptionsPanel.Controls.Add(row.Container);
-                    _tableOrderSelections[selectedTable.Name] = row;
+                    _tableOrderCandidates[selectedTable.Name] = candidates;
+                    AddOrderRuleRow(selectedTable, candidates);
 
                     if (candidates.Length == 0)
                     {
@@ -474,6 +542,39 @@ namespace banaData
                 return;
             }
 
+            List<(string Table, long RowCount)> nonEmptyTargets;
+            try
+            {
+                nonEmptyTargets = await CollectNonEmptyTargetsAsync(transferOptions);
+            }
+            catch (Exception ex)
+            {
+                var preflightMessage = $"Hedef tablo doluluk kontrolü yapılamadı: {ex.Message}";
+                AppendLog(preflightMessage);
+                MessageBox.Show(preflightMessage, "Ön Kontrol Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (nonEmptyTargets.Count > 0)
+            {
+                var details = string.Join(Environment.NewLine,
+                    nonEmptyTargets.Select(x => $"  - {x.Table}: {x.RowCount:N0} kayıt"));
+
+                var answer = MessageBox.Show(
+                    $"Aşağıdaki hedef tablolar boş değil:{Environment.NewLine}{Environment.NewLine}{details}{Environment.NewLine}{Environment.NewLine}" +
+                    "Transfere devam edilirse PK/UC çakışmaları oluşabilir. Devam edilsin mi?",
+                    "Hedef Tablo Boş Değil",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning,
+                    MessageBoxDefaultButton.Button2);
+
+                if (answer != DialogResult.Yes)
+                {
+                    AppendLog("Transfer iptal edildi: hedef tablolardan en az birinde mevcut kayıtlar var.");
+                    return;
+                }
+            }
+
             _transferCancellationTokenSource?.Dispose();
             _transferCancellationTokenSource = new CancellationTokenSource();
             _transferButton.Enabled = false;
@@ -489,11 +590,15 @@ namespace banaData
                 if (!result.IsSuccess)
                 {
                     overallSuccess = false;
+                    var body = string.IsNullOrWhiteSpace(result.Detail)
+                        ? $"{options.TableName} tablosunda hata oluştu: {result.Message}"
+                        : $"{options.TableName} tablosunda hata oluştu: {result.Message}\r\n\r\n--- Detay ---\r\n{result.Detail}";
+
                     MessageBox.Show(
-                        $"{options.TableName} tablosunda hata oluştu: {result.Message}",
+                        body,
                         "Transfer Hatası",
                         MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
+                        MessageBoxIcon.Error);
                     break;
                 }
             }
@@ -512,6 +617,25 @@ namespace banaData
             }
         }
 
+        private async Task<List<(string Table, long RowCount)>> CollectNonEmptyTargetsAsync(
+            IReadOnlyList<TransferOptions> transferOptions)
+        {
+            var result = new List<(string Table, long RowCount)>();
+            foreach (var options in transferOptions)
+            {
+                var rowCount = await _metadataService.GetRowCountAsync(
+                    options.TargetConnection,
+                    options.TargetSchema,
+                    options.TableName);
+
+                if (rowCount > 0)
+                {
+                    result.Add(($"{options.TargetSchema}.{options.TableName}", rowCount));
+                }
+            }
+            return result;
+        }
+
         private void ReportTransferProgress(TransferProgress progress)
         {
             var detail = progress.RowsRead.HasValue || progress.RowsInserted.HasValue
@@ -519,6 +643,16 @@ namespace banaData
                 : string.Empty;
 
             AppendLog($"{progress.Message}{detail}");
+
+            if (progress.IsError && !string.IsNullOrWhiteSpace(progress.Detail))
+            {
+                AppendLog("--- Hata Detayı ---");
+                foreach (var line in progress.Detail.Split('\n'))
+                {
+                    AppendLog(line.TrimEnd('\r'));
+                }
+                AppendLog("-------------------");
+            }
         }
 
         private bool TryBuildTransferOptions(out List<TransferOptions> options)
@@ -555,29 +689,32 @@ namespace banaData
 
                 if (selectedLimit.Value is not TransferRecordLimit.All)
                 {
-                    if (!_tableOrderSelections.TryGetValue(table.Name, out var selection))
+                    var row = FindOrderRuleRow(table.Name);
+                    if (row is null)
                     {
                         MessageBox.Show($"{table.Name} tablosu için sıralama ayarı bulunamadı.", "Eksik Bilgi",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return false;
                     }
 
-                    if (selection.ColumnComboBox.SelectedItem is not ComboBoxItem<string> selectedOrderColumn)
+                    var selectedOrderColumn = row.Cells["OrderColumn"].Value?.ToString();
+                    if (string.IsNullOrWhiteSpace(selectedOrderColumn))
                     {
                         MessageBox.Show($"{table.Name} tablosu için sıralama kolonu seçilmelidir.", "Eksik Bilgi",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return false;
                     }
 
-                    if (selection.DirectionComboBox.SelectedItem is not ComboBoxItem<SortDirection> selectedDirection)
+                    var selectedDirectionRaw = row.Cells["Direction"].Value?.ToString();
+                    if (!Enum.TryParse<SortDirection>(selectedDirectionRaw, true, out var selectedDirection))
                     {
                         MessageBox.Show($"{table.Name} tablosu için sıralama yönü seçilmelidir.", "Eksik Bilgi",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return false;
                     }
 
-                    orderColumn = selectedOrderColumn.Value;
-                    direction = selectedDirection.Value;
+                    orderColumn = selectedOrderColumn;
+                    direction = selectedDirection;
                 }
 
                 options.Add(new TransferOptions(
@@ -693,10 +830,10 @@ namespace banaData
             var selectedLimit = _recordLimitComboBox.SelectedItem as ComboBoxItem<TransferRecordLimit>;
             var requiresOrderColumn = selectedLimit?.Value is not TransferRecordLimit.All;
 
-            foreach (var selection in _tableOrderSelections.Values)
+            foreach (DataGridViewRow row in _tableOrderGrid.Rows)
             {
-                selection.ColumnComboBox.Enabled = requiresOrderColumn;
-                selection.DirectionComboBox.Enabled = requiresOrderColumn;
+                row.Cells["OrderColumn"].ReadOnly = !requiresOrderColumn;
+                row.Cells["Direction"].ReadOnly = !requiresOrderColumn;
             }
 
             UpdateTransferButtonState();
@@ -726,23 +863,44 @@ namespace banaData
         {
             foreach (var table in GetSelectedTables())
             {
-                if (!_tableOrderSelections.TryGetValue(table.Name, out var selection))
+                var row = FindOrderRuleRow(table.Name);
+                if (row is null)
                 {
                     return false;
                 }
 
-                if (selection.ColumnComboBox.SelectedItem is not ComboBoxItem<string>)
+                if (string.IsNullOrWhiteSpace(row.Cells["OrderColumn"].Value?.ToString()))
                 {
                     return false;
                 }
 
-                if (selection.DirectionComboBox.SelectedItem is not ComboBoxItem<SortDirection>)
+                if (!Enum.TryParse<SortDirection>(row.Cells["Direction"].Value?.ToString(), true, out _))
                 {
                     return false;
                 }
             }
 
             return true;
+        }
+
+        private void EnsureValidSplitterDistance()
+        {
+            if (_selectionSplitContainer is null)
+                return;
+
+            var totalWidth = _selectionSplitContainer.ClientSize.Width;
+            var min = _selectionSplitContainer.Panel1MinSize;
+            var panel2Min = _selectionSplitContainer.Panel2MinSize;
+
+            if (totalWidth <= 0 || totalWidth < min + panel2Min)
+                return;
+
+            var maxValid = totalWidth - panel2Min;
+            var preferred = 300;
+            var clamped = Math.Min(maxValid, Math.Max(min, preferred));
+
+            if (_selectionSplitContainer.SplitterDistance != clamped)
+                _selectionSplitContainer.SplitterDistance = clamped;
         }
 
         private IEnumerable<DatabaseObject> GetSelectedTables()
@@ -752,69 +910,38 @@ namespace banaData
                 .Select(item => item.Value);
         }
 
-        private TableOrderSelection CreateOrderSelectionRow(DatabaseObject table, IReadOnlyList<ColumnMetadata> candidates)
+        private void AddOrderRuleRow(DatabaseObject table, IReadOnlyList<ColumnMetadata> candidates)
         {
-            var container = new Panel
+            var rowIndex = _tableOrderGrid.Rows.Add();
+            var row = _tableOrderGrid.Rows[rowIndex];
+            row.Cells["TableName"].Value = table.Name;
+
+            var orderCell = new DataGridViewComboBoxCell { FlatStyle = FlatStyle.Popup };
+            foreach (var candidate in candidates)
             {
-                Width = 860,
-                Height = 32,
-                Margin = new Padding(0, 0, 0, 6)
-            };
-
-            var tableLabel = new Label
-            {
-                Text = table.Name,
-                AutoSize = false,
-                Width = 220,
-                Height = 26,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Location = new Point(0, 2)
-            };
-
-            var columnComboBox = CreateDropDown();
-            columnComboBox.Dock = DockStyle.None;
-            columnComboBox.Width = 460;
-            columnComboBox.Location = new Point(230, 0);
-            columnComboBox.SelectedIndexChanged += (_, _) => UpdateTransferButtonState();
-
-            foreach (var column in candidates)
-            {
-                var label = column.IsPrimaryKey || column.IsUnique || column.IsIdentity
-                    ? $"{column.Name} ({column.SqlType}, key/identity)"
-                    : $"{column.Name} ({column.SqlType})";
-
-                columnComboBox.Items.Add(new ComboBoxItem<string>(label, column.Name));
+                orderCell.Items.Add(candidate.Name);
             }
 
             var defaultColumn = SelectDefaultOrderColumn(table.Name, candidates);
-            if (defaultColumn is not null)
+            if (!string.IsNullOrWhiteSpace(defaultColumn))
             {
-                var index = columnComboBox.Items
-                    .OfType<ComboBoxItem<string>>()
-                    .Select((item, index) => new { item, index })
-                    .FirstOrDefault(pair => string.Equals(pair.item.Value, defaultColumn, StringComparison.OrdinalIgnoreCase))
-                    ?.index;
-
-                if (index.HasValue)
-                {
-                    columnComboBox.SelectedIndex = index.Value;
-                }
+                orderCell.Value = defaultColumn;
             }
 
-            var directionComboBox = CreateDropDown();
-            directionComboBox.Dock = DockStyle.None;
-            directionComboBox.Width = 150;
-            directionComboBox.Location = new Point(700, 0);
-            directionComboBox.SelectedIndexChanged += (_, _) => UpdateTransferButtonState();
-            directionComboBox.Items.Add(new ComboBoxItem<SortDirection>("Descending", SortDirection.Descending));
-            directionComboBox.Items.Add(new ComboBoxItem<SortDirection>("Ascending", SortDirection.Ascending));
-            directionComboBox.SelectedIndex = 0;
+            var directionCell = new DataGridViewComboBoxCell { FlatStyle = FlatStyle.Popup };
+            directionCell.Items.Add(SortDirection.Descending.ToString());
+            directionCell.Items.Add(SortDirection.Ascending.ToString());
+            directionCell.Value = SortDirection.Descending.ToString();
 
-            container.Controls.Add(tableLabel);
-            container.Controls.Add(columnComboBox);
-            container.Controls.Add(directionComboBox);
+            row.Cells["OrderColumn"] = orderCell;
+            row.Cells["Direction"] = directionCell;
+        }
 
-            return new TableOrderSelection(table, container, columnComboBox, directionComboBox);
+        private DataGridViewRow? FindOrderRuleRow(string tableName)
+        {
+            return _tableOrderGrid.Rows
+                .Cast<DataGridViewRow>()
+                .FirstOrDefault(row => string.Equals(row.Cells["TableName"].Value?.ToString(), tableName, StringComparison.OrdinalIgnoreCase));
         }
 
         private void AppendLog(string message)
@@ -1050,11 +1177,5 @@ namespace banaData
 
             public override string ToString() => Text;
         }
-
-        private sealed record TableOrderSelection(
-            DatabaseObject Table,
-            Panel Container,
-            ComboBox ColumnComboBox,
-            ComboBox DirectionComboBox);
     }
 }
