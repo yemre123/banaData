@@ -712,7 +712,7 @@ namespace banaData
                 columnComboBox.Items.Add(new ComboBoxItem<string>(label, column.Name));
             }
 
-            var defaultColumn = SelectDefaultOrderColumn(candidates);
+            var defaultColumn = SelectDefaultOrderColumn(table.Name, candidates);
             if (defaultColumn is not null)
             {
                 var index = columnComboBox.Items
@@ -771,15 +771,152 @@ namespace banaData
                    column.SqlType.Equals("tinyint", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static string? SelectDefaultOrderColumn(IReadOnlyList<ColumnMetadata> candidates)
+        private static string? SelectDefaultOrderColumn(string tableName, IReadOnlyList<ColumnMetadata> candidates)
         {
+            // 1) Primary key varsa her zaman onu kullan.
+            var primaryKeyColumn = candidates
+                .Where(column => column.IsPrimaryKey)
+                .OrderBy(column => column.Ordinal)
+                .Select(column => column.Name)
+                .FirstOrDefault();
+
+            if (!string.IsNullOrWhiteSpace(primaryKeyColumn))
+            {
+                return primaryKeyColumn;
+            }
+
+            // 2) PK yoksa CreateDate benzeri kolonları ara.
+            var createDateColumn = candidates
+                .Where(column => IsDateLikeType(column.SqlType))
+                .OrderBy(column => GetCreateDateNameScore(column.Name))
+                .ThenBy(column => column.Ordinal)
+                .FirstOrDefault(column => GetCreateDateNameScore(column.Name) < int.MaxValue);
+
+            if (createDateColumn is not null)
+            {
+                return createDateColumn.Name;
+            }
+
+            // 3) O da yoksa tablo adına benzeyen date kolonu ara (faOrder -> OrderDate).
+            var tableKeyword = ExtractTableKeyword(tableName);
+            if (!string.IsNullOrWhiteSpace(tableKeyword))
+            {
+                var relatedDateColumn = candidates
+                    .Where(column => IsDateLikeType(column.SqlType))
+                    .OrderBy(column => GetTableRelatedDateScore(column.Name, tableKeyword))
+                    .ThenBy(column => column.Ordinal)
+                    .FirstOrDefault(column => GetTableRelatedDateScore(column.Name, tableKeyword) < int.MaxValue);
+
+                if (relatedDateColumn is not null)
+                {
+                    return relatedDateColumn.Name;
+                }
+            }
+
+            // 4) Yine bulunamazsa mevcut genel mantığa dön.
             return candidates
-                .OrderByDescending(column => column.IsPrimaryKey)
+                .OrderByDescending(column => IsDateLikeType(column.SqlType))
                 .ThenByDescending(column => column.IsIdentity)
                 .ThenByDescending(column => column.IsUnique)
                 .ThenBy(column => column.Ordinal)
                 .Select(column => column.Name)
                 .FirstOrDefault();
+        }
+
+        private static int GetCreateDateNameScore(string columnName)
+        {
+            if (columnName.Equals("CreateDate", StringComparison.OrdinalIgnoreCase))
+            {
+                return 0;
+            }
+
+            if (columnName.Equals("CreatedDate", StringComparison.OrdinalIgnoreCase) ||
+                columnName.Equals("CreationDate", StringComparison.OrdinalIgnoreCase))
+            {
+                return 1;
+            }
+
+            if (columnName.Equals("CreatedOn", StringComparison.OrdinalIgnoreCase) ||
+                columnName.Equals("CreateDt", StringComparison.OrdinalIgnoreCase) ||
+                columnName.Equals("InsertDate", StringComparison.OrdinalIgnoreCase))
+            {
+                return 2;
+            }
+
+            if (columnName.Contains("create", StringComparison.OrdinalIgnoreCase) &&
+                columnName.Contains("date", StringComparison.OrdinalIgnoreCase))
+            {
+                return 3;
+            }
+
+            if (columnName.Contains("created", StringComparison.OrdinalIgnoreCase) ||
+                columnName.Contains("insert", StringComparison.OrdinalIgnoreCase))
+            {
+                return 4;
+            }
+
+            return int.MaxValue;
+        }
+
+        private static int GetTableRelatedDateScore(string columnName, string tableKeyword)
+        {
+            if (columnName.Equals($"{tableKeyword}Date", StringComparison.OrdinalIgnoreCase))
+            {
+                return 0;
+            }
+
+            if (columnName.Contains(tableKeyword, StringComparison.OrdinalIgnoreCase) &&
+                columnName.Contains("date", StringComparison.OrdinalIgnoreCase))
+            {
+                return 1;
+            }
+
+            return int.MaxValue;
+        }
+
+        private static string ExtractTableKeyword(string tableName)
+        {
+            if (string.IsNullOrWhiteSpace(tableName))
+            {
+                return string.Empty;
+            }
+
+            var parts = tableName
+                .Split(['_', '-', ' '], StringSplitOptions.RemoveEmptyEntries)
+                .SelectMany(SplitCamelCase)
+                .Where(part => part.Length > 2)
+                .ToArray();
+
+            return parts.Length == 0 ? tableName : parts[^1];
+        }
+
+        private static IEnumerable<string> SplitCamelCase(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                yield break;
+            }
+
+            var start = 0;
+            for (var i = 1; i < value.Length; i++)
+            {
+                if (char.IsUpper(value[i]) && !char.IsUpper(value[i - 1]))
+                {
+                    yield return value[start..i];
+                    start = i;
+                }
+            }
+
+            yield return value[start..];
+        }
+
+        private static bool IsDateLikeType(string sqlType)
+        {
+            return sqlType.Equals("date", StringComparison.OrdinalIgnoreCase) ||
+                   sqlType.Equals("datetime", StringComparison.OrdinalIgnoreCase) ||
+                   sqlType.Equals("datetime2", StringComparison.OrdinalIgnoreCase) ||
+                   sqlType.Equals("smalldatetime", StringComparison.OrdinalIgnoreCase) ||
+                   sqlType.Equals("datetimeoffset", StringComparison.OrdinalIgnoreCase);
         }
 
         private static TextBox CreateTextBox()
