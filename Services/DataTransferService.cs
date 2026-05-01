@@ -195,7 +195,8 @@ public sealed class DataTransferService
             return $"SELECT {columns} FROM {sourceTable};";
         }
 
-        return $"SELECT TOP (@take) {columns} FROM {sourceTable} ORDER BY {SqlIdentifier.Quote(options.OrderByColumn!)} DESC;";
+        var direction = options.SortDirection == SortDirection.Ascending ? "ASC" : "DESC";
+        return $"SELECT TOP (@take) {columns} FROM {sourceTable} ORDER BY {SqlIdentifier.Quote(options.OrderByColumn!)} {direction};";
     }
 
     private static DataTable CreateBatchTable(SqlDataReader reader, IReadOnlyList<ColumnMetadata> insertColumns)

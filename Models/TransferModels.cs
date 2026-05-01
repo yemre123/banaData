@@ -59,6 +59,12 @@ public enum TransferRecordLimit
     All
 }
 
+public enum SortDirection
+{
+    Ascending,
+    Descending
+}
+
 public sealed record TransferOptions(
     SqlConnectionSettings SourceConnection,
     SqlConnectionSettings TargetConnection,
@@ -66,7 +72,8 @@ public sealed record TransferOptions(
     string TargetSchema,
     string TableName,
     TransferRecordLimit RecordLimit,
-    string? OrderByColumn);
+    string? OrderByColumn,
+    SortDirection SortDirection = SortDirection.Descending);
 
 public sealed record TransferProgress(
     string Message,

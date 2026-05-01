@@ -29,10 +29,11 @@ namespace banaData
         private ComboBox _targetSchemaComboBox = null!;
         private CheckedListBox _tableCheckedListBox = null!;
         private ComboBox _recordLimitComboBox = null!;
-        private ComboBox _orderColumnComboBox = null!;
+        private FlowLayoutPanel _tableOrderOptionsPanel = null!;
         private Button _transferButton = null!;
         private ProgressBar _progressBar = null!;
         private TextBox _logTextBox = null!;
+        private readonly Dictionary<string, TableOrderSelection> _tableOrderSelections = new(StringComparer.OrdinalIgnoreCase);
 
         private bool _sourceConnectionIsValid;
         private bool _targetConnectionIsValid;
@@ -213,7 +214,13 @@ namespace banaData
                 IntegralHeight = false
             };
             _recordLimitComboBox = CreateDropDown();
-            _orderColumnComboBox = CreateDropDown();
+            _tableOrderOptionsPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false
+            };
 
             _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Son 1000 kayıt", TransferRecordLimit.Last1000));
             _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Son 5000 kayıt", TransferRecordLimit.Last5000));
@@ -224,13 +231,12 @@ namespace banaData
             AddLabeledControl(layout, "Target schema", _targetSchemaComboBox);
             AddLabeledControl(layout, "Source tables", _tableCheckedListBox);
             AddLabeledControl(layout, "Record limit", _recordLimitComboBox);
-            AddLabeledControl(layout, "Order column", _orderColumnComboBox);
+            AddLabeledControl(layout, "Table order rules", _tableOrderOptionsPanel);
 
             _sourceSchemaComboBox.SelectedIndexChanged += async (_, _) => await LoadSourceTablesAsync();
             _tableCheckedListBox.ItemCheck += TableCheckedListBoxOnItemCheck;
             _recordLimitComboBox.SelectedIndexChanged += (_, _) => UpdateOrderColumnState();
             _targetSchemaComboBox.SelectedIndexChanged += (_, _) => UpdateTransferButtonState();
-            _orderColumnComboBox.SelectedIndexChanged += (_, _) => UpdateTransferButtonState();
 
             groupBox.Controls.Add(layout);
             return groupBox;
@@ -370,7 +376,8 @@ namespace banaData
             try
             {
                 _tableCheckedListBox.Items.Clear();
-                _orderColumnComboBox.Items.Clear();
+                _tableOrderOptionsPanel.Controls.Clear();
+                _tableOrderSelections.Clear();
 
                 var tables = await _metadataService.GetTablesAsync(settings, sourceSchema);
                 foreach (var table in tables)
@@ -385,22 +392,18 @@ namespace banaData
                 AppendLog($"Tablo listesi okunamadı: {ex.Message}");
             }
 
-            await LoadOrderColumnsAsync();
+            await RebuildTableOrderOptionsAsync();
             UpdateTransferButtonState();
         }
 
-        private async Task LoadOrderColumnsAsync()
+        private async Task RebuildTableOrderOptionsAsync()
         {
-            _orderColumnComboBox.Items.Clear();
+            _tableOrderOptionsPanel.Controls.Clear();
+            _tableOrderSelections.Clear();
 
             var selectedTables = GetSelectedTables().ToArray();
-            if (selectedTables.Length != 1)
+            if (selectedTables.Length == 0)
             {
-                if (selectedTables.Length > 1)
-                {
-                    AppendLog("Birden fazla tablo seçili. 'Son kayıt' transferi yerine 'Tüm kayıtlar' seçmelisiniz.");
-                }
-
                 UpdateOrderColumnState();
                 return;
             }
@@ -415,26 +418,19 @@ namespace banaData
 
             try
             {
-                var selectedTable = selectedTables[0];
-                var columns = await _metadataService.GetColumnsAsync(settings, sourceSchema, selectedTable.Name);
-                var candidates = columns.Where(IsGoodOrderColumnCandidate).ToArray();
-
-                foreach (var column in candidates)
+                foreach (var selectedTable in selectedTables)
                 {
-                    var label = column.IsPrimaryKey || column.IsUnique || column.IsIdentity
-                        ? $"{column.Name} ({column.SqlType}, key/identity)"
-                        : $"{column.Name} ({column.SqlType})";
+                    var columns = await _metadataService.GetColumnsAsync(settings, sourceSchema, selectedTable.Name);
+                    var candidates = columns.Where(IsGoodOrderColumnCandidate).ToArray();
 
-                    _orderColumnComboBox.Items.Add(new ComboBoxItem<string>(label, column.Name));
-                }
+                    var row = CreateOrderSelectionRow(selectedTable, candidates);
+                    _tableOrderOptionsPanel.Controls.Add(row.Container);
+                    _tableOrderSelections[selectedTable.Name] = row;
 
-                if (_orderColumnComboBox.Items.Count > 0)
-                {
-                    _orderColumnComboBox.SelectedIndex = 0;
-                }
-                else
-                {
-                    AppendLog("Uyarı: Son kayıt seçimi için kullanılabilecek net bir sıralama kolonu bulunamadı.");
+                    if (candidates.Length == 0)
+                    {
+                        AppendLog($"Uyarı: {selectedTable.Name} tablosu için uygun sıralama kolonu bulunamadı.");
+                    }
                 }
             }
             catch (Exception ex)
@@ -449,7 +445,7 @@ namespace banaData
         {
             BeginInvoke(async () =>
             {
-                await LoadOrderColumnsAsync();
+                await RebuildTableOrderOptionsAsync();
                 UpdateTransferButtonState();
             });
         }
@@ -535,28 +531,38 @@ namespace banaData
                 return false;
             }
 
-            if (selectedTables.Length > 1 && selectedLimit.Value is not TransferRecordLimit.All)
-            {
-                MessageBox.Show("Birden fazla tablo seçildiğinde kayıt limiti yalnızca 'Tüm kayıtlar' olabilir.", "Seçim Uyuşmazlığı",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return false;
-            }
-
-            string? orderColumn = null;
-            if (selectedLimit.Value is not TransferRecordLimit.All)
-            {
-                if (_orderColumnComboBox.SelectedItem is not ComboBoxItem<string> selectedOrderColumn)
-                {
-                    MessageBox.Show("Son kayıtları aktarabilmek için sıralama kolonu seçilmelidir.", "Eksik Bilgi",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return false;
-                }
-
-                orderColumn = selectedOrderColumn.Value;
-            }
-
             foreach (var table in selectedTables)
             {
+                string? orderColumn = null;
+                var direction = SortDirection.Descending;
+
+                if (selectedLimit.Value is not TransferRecordLimit.All)
+                {
+                    if (!_tableOrderSelections.TryGetValue(table.Name, out var selection))
+                    {
+                        MessageBox.Show($"{table.Name} tablosu için sıralama ayarı bulunamadı.", "Eksik Bilgi",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return false;
+                    }
+
+                    if (selection.ColumnComboBox.SelectedItem is not ComboBoxItem<string> selectedOrderColumn)
+                    {
+                        MessageBox.Show($"{table.Name} tablosu için sıralama kolonu seçilmelidir.", "Eksik Bilgi",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return false;
+                    }
+
+                    if (selection.DirectionComboBox.SelectedItem is not ComboBoxItem<SortDirection> selectedDirection)
+                    {
+                        MessageBox.Show($"{table.Name} tablosu için sıralama yönü seçilmelidir.", "Eksik Bilgi",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return false;
+                    }
+
+                    orderColumn = selectedOrderColumn.Value;
+                    direction = selectedDirection.Value;
+                }
+
                 options.Add(new TransferOptions(
                     sourceConnection,
                     targetConnection,
@@ -564,7 +570,8 @@ namespace banaData
                     targetSchema,
                     table.Name,
                     selectedLimit.Value,
-                    orderColumn));
+                    orderColumn,
+                    direction));
             }
 
             return true;
@@ -610,8 +617,14 @@ namespace banaData
         private void UpdateOrderColumnState()
         {
             var selectedLimit = _recordLimitComboBox.SelectedItem as ComboBoxItem<TransferRecordLimit>;
-            var requiresOrderColumn = selectedLimit?.Value is not TransferRecordLimit.All && GetSelectedTables().Count() == 1;
-            _orderColumnComboBox.Enabled = requiresOrderColumn;
+            var requiresOrderColumn = selectedLimit?.Value is not TransferRecordLimit.All;
+
+            foreach (var selection in _tableOrderSelections.Values)
+            {
+                selection.ColumnComboBox.Enabled = requiresOrderColumn;
+                selection.DirectionComboBox.Enabled = requiresOrderColumn;
+            }
+
             UpdateTransferButtonState();
         }
 
@@ -623,7 +636,7 @@ namespace banaData
             }
 
             var selectedLimit = _recordLimitComboBox.SelectedItem as ComboBoxItem<TransferRecordLimit>;
-            var orderColumnIsReady = selectedLimit?.Value is TransferRecordLimit.All || _orderColumnComboBox.SelectedItem is not null;
+            var orderColumnIsReady = selectedLimit?.Value is TransferRecordLimit.All || AreAllOrderSelectionsValid();
 
             _transferButton.Enabled =
                 _sourceConnectionIsValid &&
@@ -635,11 +648,99 @@ namespace banaData
                 orderColumnIsReady;
         }
 
+        private bool AreAllOrderSelectionsValid()
+        {
+            foreach (var table in GetSelectedTables())
+            {
+                if (!_tableOrderSelections.TryGetValue(table.Name, out var selection))
+                {
+                    return false;
+                }
+
+                if (selection.ColumnComboBox.SelectedItem is not ComboBoxItem<string>)
+                {
+                    return false;
+                }
+
+                if (selection.DirectionComboBox.SelectedItem is not ComboBoxItem<SortDirection>)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private IEnumerable<DatabaseObject> GetSelectedTables()
         {
             return _tableCheckedListBox.CheckedItems
                 .OfType<ComboBoxItem<DatabaseObject>>()
                 .Select(item => item.Value);
+        }
+
+        private TableOrderSelection CreateOrderSelectionRow(DatabaseObject table, IReadOnlyList<ColumnMetadata> candidates)
+        {
+            var container = new Panel
+            {
+                Width = 860,
+                Height = 32,
+                Margin = new Padding(0, 0, 0, 6)
+            };
+
+            var tableLabel = new Label
+            {
+                Text = table.Name,
+                AutoSize = false,
+                Width = 220,
+                Height = 26,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Location = new Point(0, 2)
+            };
+
+            var columnComboBox = CreateDropDown();
+            columnComboBox.Dock = DockStyle.None;
+            columnComboBox.Width = 460;
+            columnComboBox.Location = new Point(230, 0);
+            columnComboBox.SelectedIndexChanged += (_, _) => UpdateTransferButtonState();
+
+            foreach (var column in candidates)
+            {
+                var label = column.IsPrimaryKey || column.IsUnique || column.IsIdentity
+                    ? $"{column.Name} ({column.SqlType}, key/identity)"
+                    : $"{column.Name} ({column.SqlType})";
+
+                columnComboBox.Items.Add(new ComboBoxItem<string>(label, column.Name));
+            }
+
+            var defaultColumn = SelectDefaultOrderColumn(candidates);
+            if (defaultColumn is not null)
+            {
+                var index = columnComboBox.Items
+                    .OfType<ComboBoxItem<string>>()
+                    .Select((item, index) => new { item, index })
+                    .FirstOrDefault(pair => string.Equals(pair.item.Value, defaultColumn, StringComparison.OrdinalIgnoreCase))
+                    ?.index;
+
+                if (index.HasValue)
+                {
+                    columnComboBox.SelectedIndex = index.Value;
+                }
+            }
+
+            var directionComboBox = CreateDropDown();
+            directionComboBox.Dock = DockStyle.None;
+            directionComboBox.Width = 150;
+            directionComboBox.Location = new Point(700, 0);
+            directionComboBox.SelectedIndexChanged += (_, _) => UpdateTransferButtonState();
+            directionComboBox.Items.Add(new ComboBoxItem<SortDirection>("Descending", SortDirection.Descending));
+            directionComboBox.Items.Add(new ComboBoxItem<SortDirection>("Ascending", SortDirection.Ascending));
+            directionComboBox.SelectedIndex = 0;
+
+            container.Controls.Add(tableLabel);
+            container.Controls.Add(columnComboBox);
+            container.Controls.Add(directionComboBox);
+
+            return new TableOrderSelection(table, container, columnComboBox, directionComboBox);
         }
 
         private void AppendLog(string message)
@@ -668,6 +769,17 @@ namespace banaData
                    column.SqlType.Equals("int", StringComparison.OrdinalIgnoreCase) ||
                    column.SqlType.Equals("smallint", StringComparison.OrdinalIgnoreCase) ||
                    column.SqlType.Equals("tinyint", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string? SelectDefaultOrderColumn(IReadOnlyList<ColumnMetadata> candidates)
+        {
+            return candidates
+                .OrderByDescending(column => column.IsPrimaryKey)
+                .ThenByDescending(column => column.IsIdentity)
+                .ThenByDescending(column => column.IsUnique)
+                .ThenBy(column => column.Ordinal)
+                .Select(column => column.Name)
+                .FirstOrDefault();
         }
 
         private static TextBox CreateTextBox()
@@ -727,5 +839,11 @@ namespace banaData
 
             public override string ToString() => Text;
         }
+
+        private sealed record TableOrderSelection(
+            DatabaseObject Table,
+            Panel Container,
+            ComboBox ColumnComboBox,
+            ComboBox DirectionComboBox);
     }
 }
