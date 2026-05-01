@@ -40,6 +40,7 @@ namespace banaData
         private bool _sourceConnectionIsValid;
         private bool _targetConnectionIsValid;
         private bool _isLoadingSourceTables;
+        private bool _isBulkCheckingTables;
         private CancellationTokenSource? _transferCancellationTokenSource;
 
         public Form1()
@@ -239,9 +240,30 @@ namespace banaData
             var sourceTablesGroup = new GroupBox
             {
                 Text = "Source tables",
-                Dock = DockStyle.Fill
+                Dock = DockStyle.Fill,
+                Padding = new Padding(6, 6, 6, 6)
             };
+
+            var sourceTablesToolbar = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                Margin = new Padding(0),
+                Padding = new Padding(0, 0, 0, 4)
+            };
+
+            var selectAllTablesButton = new Button { Text = "Tümünü Seç", AutoSize = true };
+            selectAllTablesButton.Click += async (_, _) => await SetAllTablesCheckedAsync(true);
+
+            var clearAllTablesButton = new Button { Text = "Temizle", AutoSize = true };
+            clearAllTablesButton.Click += async (_, _) => await SetAllTablesCheckedAsync(false);
+
+            sourceTablesToolbar.Controls.Add(selectAllTablesButton);
+            sourceTablesToolbar.Controls.Add(clearAllTablesButton);
+
             sourceTablesGroup.Controls.Add(_tableCheckedListBox);
+            sourceTablesGroup.Controls.Add(sourceTablesToolbar);
             _selectionSplitContainer.Panel1.Controls.Add(sourceTablesGroup);
 
             var orderRulesGroup = new GroupBox
@@ -528,11 +550,40 @@ namespace banaData
 
         private void TableCheckedListBoxOnItemCheck(object? sender, ItemCheckEventArgs e)
         {
+            if (_isBulkCheckingTables)
+            {
+                return;
+            }
+
             BeginInvoke(async () =>
             {
                 await RebuildTableOrderOptionsAsync();
                 UpdateTransferButtonState();
             });
+        }
+
+        private async Task SetAllTablesCheckedAsync(bool checkedState)
+        {
+            if (_tableCheckedListBox.Items.Count == 0)
+            {
+                return;
+            }
+
+            _isBulkCheckingTables = true;
+            try
+            {
+                for (var i = 0; i < _tableCheckedListBox.Items.Count; i++)
+                {
+                    _tableCheckedListBox.SetItemChecked(i, checkedState);
+                }
+            }
+            finally
+            {
+                _isBulkCheckingTables = false;
+            }
+
+            await RebuildTableOrderOptionsAsync();
+            UpdateTransferButtonState();
         }
 
         private async Task StartTransferAsync()
