@@ -158,11 +158,11 @@ public sealed class DataTransferService
             return ValidationResult.Invalid(columnValidationMessage);
         }
 
-        if (options.RecordLimit is not TransferRecordLimit.All)
+        if (options.RecordLimit is not TransferRecordLimit.All && options.UseOrderBy)
         {
             if (string.IsNullOrWhiteSpace(options.OrderByColumn))
             {
-                return ValidationResult.Invalid("Son kayıtları seçmek için sıralama kolonu seçilmelidir.");
+                return ValidationResult.Invalid("Son kayıtları sıralayarak seçmek için sıralama kolonu seçilmelidir veya ORDER BY kapatılmalıdır.");
             }
 
             var orderColumn = sourceColumns.FirstOrDefault(column => column.Name == options.OrderByColumn);
@@ -235,6 +235,11 @@ public sealed class DataTransferService
         if (options.RecordLimit is TransferRecordLimit.All)
         {
             return $"SELECT {columns} FROM {sourceTable};";
+        }
+
+        if (!options.UseOrderBy)
+        {
+            return $"SELECT TOP (@take) {columns} FROM {sourceTable};";
         }
 
         var direction = options.SortDirection == SortDirection.Ascending ? "ASC" : "DESC";

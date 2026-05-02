@@ -1,3 +1,4 @@
+using System.Text;
 using banaData.Models;
 using banaData.Services;
 
@@ -36,6 +37,7 @@ namespace banaData
         private ProgressBar _progressBar = null!;
         private TextBox _logTextBox = null!;
         private readonly Dictionary<string, IReadOnlyList<ColumnMetadata>> _tableOrderCandidates = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, bool> _tableOrderFallbackWeak = new(StringComparer.OrdinalIgnoreCase);
 
         private bool _sourceConnectionIsValid;
         private bool _targetConnectionIsValid;
@@ -336,11 +338,19 @@ namespace banaData
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
             };
 
+            var useOrderByColumn = new DataGridViewCheckBoxColumn
+            {
+                Name = "UseOrderBy",
+                HeaderText = "ORDER BY",
+                FillWeight = 14,
+                ThreeState = false
+            };
+
             var tableColumn = new DataGridViewTextBoxColumn
             {
                 Name = "TableName",
                 HeaderText = "Table",
-                FillWeight = 34,
+                FillWeight = 30,
                 ReadOnly = true
             };
 
@@ -348,7 +358,7 @@ namespace banaData
             {
                 Name = "OrderColumn",
                 HeaderText = "Order column",
-                FillWeight = 46,
+                FillWeight = 40,
                 FlatStyle = FlatStyle.Popup
             };
 
@@ -356,15 +366,16 @@ namespace banaData
             {
                 Name = "Direction",
                 HeaderText = "Direction",
-                FillWeight = 20,
+                FillWeight = 16,
                 FlatStyle = FlatStyle.Popup
             };
 
+            grid.Columns.Add(useOrderByColumn);
             grid.Columns.Add(tableColumn);
             grid.Columns.Add(orderColumn);
             grid.Columns.Add(directionColumn);
-            grid.CurrentCellDirtyStateChanged += (_, _) => UpdateTransferButtonState();
-            grid.CellValueChanged += (_, _) => UpdateTransferButtonState();
+            grid.CurrentCellDirtyStateChanged += OrderRulesGridOnCurrentCellDirtyStateChanged;
+            grid.CellValueChanged += (_, _) => UpdateOrderColumnState();
 
             return grid;
         }
@@ -482,6 +493,7 @@ namespace banaData
                 _tableCheckedListBox.Items.Clear();
                 _tableOrderGrid.Rows.Clear();
                 _tableOrderCandidates.Clear();
+                _tableOrderFallbackWeak.Clear();
 
                 var tables = await _metadataService.GetTablesAsync(settings, sourceSchema);
                 foreach (var table in tables)
@@ -509,6 +521,7 @@ namespace banaData
             var rebuildGeneration = ++_tableOrderRebuildGeneration;
             _tableOrderGrid.Rows.Clear();
             _tableOrderCandidates.Clear();
+            _tableOrderFallbackWeak.Clear();
 
             var selectedTables = GetSelectedTables().ToArray();
             if (selectedTables.Length == 0)
@@ -535,16 +548,19 @@ namespace banaData
                         return;
                     }
 
-                    var candidates = columns.Where(IsGoodOrderColumnCandidate).ToArray();
-
+                    var goodCandidates = columns.Where(IsGoodOrderColumnCandidate).ToArray();
+                    var candidates = goodCandidates;
                     string? defaultOverride = null;
+                    var usedWeakFallback = false;
                     if (candidates.Length == 0)
                     {
                         candidates = columns.Where(c => !c.IsComputed).ToArray();
                         defaultOverride = SelectFallbackDefaultOrderColumn(candidates);
+                        usedWeakFallback = true;
                     }
 
                     _tableOrderCandidates[selectedTable.Name] = candidates;
+                    _tableOrderFallbackWeak[selectedTable.Name] = usedWeakFallback;
                     AddOrderRuleRow(selectedTable, candidates, defaultOverride);
 
                     if (candidates.Length == 0)
@@ -613,6 +629,12 @@ namespace banaData
         {
             if (!TryBuildTransferOptions(out var transferOptions))
             {
+                return;
+            }
+
+            if (!ConfirmRiskyTransferScenarios(transferOptions))
+            {
+                AppendLog("Transfer iptal edildi: riskli veya tutarsız seçimler için onay verilmedi.");
                 return;
             }
 
@@ -710,6 +732,65 @@ namespace banaData
             return result;
         }
 
+        private bool ConfirmRiskyTransferScenarios(IReadOnlyList<TransferOptions> transferOptions)
+        {
+            var topWithoutOrder = transferOptions
+                .Where(o => o.RecordLimit is not TransferRecordLimit.All && !o.UseOrderBy)
+                .Select(o => o.TableName)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var weakOrderTables = transferOptions
+                .Where(o => o.UseOrderBy && _tableOrderFallbackWeak.GetValueOrDefault(o.TableName))
+                .Select(o => o.TableName)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (topWithoutOrder.Length == 0 && weakOrderTables.Length == 0)
+            {
+                return true;
+            }
+
+            var sb = new StringBuilder();
+
+            if (topWithoutOrder.Length > 0)
+            {
+                sb.AppendLine("Kayıt limiti varken ORDER BY kapalı olan tablolar:");
+                foreach (var name in topWithoutOrder)
+                {
+                    sb.AppendLine($"  • {name}");
+                }
+
+                sb.AppendLine();
+                sb.AppendLine("SQL Server hangi satırların seçileceğini garanti etmez; \"son N kayıt\" beklemeyin.");
+                sb.AppendLine();
+            }
+
+            if (weakOrderTables.Length > 0)
+            {
+                sb.AppendLine("Uygun sıralama kolonu bulunamadığı için varsayılan kolon tahminle seçilen tablolar:");
+                foreach (var name in weakOrderTables)
+                {
+                    sb.AppendLine($"  • {name}");
+                }
+
+                sb.AppendLine();
+            }
+
+            sb.Append("Bu durumlarla devam etmek istiyor musunuz?");
+
+            var answer = MessageBox.Show(
+                sb.ToString().TrimEnd(),
+                "Transfer — Onay",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+
+            return answer == DialogResult.Yes;
+        }
+
         private void ReportTransferProgress(TransferProgress progress)
         {
             var detail = progress.RowsRead.HasValue || progress.RowsInserted.HasValue
@@ -760,6 +841,7 @@ namespace banaData
             {
                 string? orderColumn = null;
                 var direction = SortDirection.Descending;
+                var useOrderBy = true;
 
                 if (selectedLimit.Value is not TransferRecordLimit.All)
                 {
@@ -771,24 +853,29 @@ namespace banaData
                         return false;
                     }
 
-                    var selectedOrderColumn = row.Cells["OrderColumn"].Value?.ToString();
-                    if (string.IsNullOrWhiteSpace(selectedOrderColumn))
-                    {
-                        MessageBox.Show($"{table.Name} tablosu için sıralama kolonu seçilmelidir.", "Eksik Bilgi",
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return false;
-                    }
+                    useOrderBy = ReadUseOrderByCell(row);
 
-                    var selectedDirectionRaw = row.Cells["Direction"].Value?.ToString();
-                    if (!Enum.TryParse<SortDirection>(selectedDirectionRaw, true, out var selectedDirection))
+                    if (useOrderBy)
                     {
-                        MessageBox.Show($"{table.Name} tablosu için sıralama yönü seçilmelidir.", "Eksik Bilgi",
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return false;
-                    }
+                        var selectedOrderColumn = row.Cells["OrderColumn"].Value?.ToString();
+                        if (string.IsNullOrWhiteSpace(selectedOrderColumn))
+                        {
+                            MessageBox.Show($"{table.Name} tablosu için sıralama kolonu seçilmelidir (ORDER BY açıksa).", "Eksik Bilgi",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return false;
+                        }
 
-                    orderColumn = selectedOrderColumn;
-                    direction = selectedDirection;
+                        var selectedDirectionRaw = row.Cells["Direction"].Value?.ToString();
+                        if (!Enum.TryParse<SortDirection>(selectedDirectionRaw, true, out var selectedDirection))
+                        {
+                            MessageBox.Show($"{table.Name} tablosu için sıralama yönü seçilmelidir.", "Eksik Bilgi",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return false;
+                        }
+
+                        orderColumn = selectedOrderColumn;
+                        direction = selectedDirection;
+                    }
                 }
 
                 options.Add(new TransferOptions(
@@ -798,6 +885,7 @@ namespace banaData
                     targetSchema,
                     table.Name,
                     selectedLimit.Value,
+                    useOrderBy,
                     orderColumn,
                     direction));
             }
@@ -902,15 +990,41 @@ namespace banaData
         private void UpdateOrderColumnState()
         {
             var selectedLimit = _recordLimitComboBox.SelectedItem as ComboBoxItem<TransferRecordLimit>;
-            var requiresOrderColumn = selectedLimit?.Value is not TransferRecordLimit.All;
+            var limitApplies = selectedLimit?.Value is not TransferRecordLimit.All;
 
             foreach (DataGridViewRow row in _tableOrderGrid.Rows)
             {
-                row.Cells["OrderColumn"].ReadOnly = !requiresOrderColumn;
-                row.Cells["Direction"].ReadOnly = !requiresOrderColumn;
+                var useOrderBy = ReadUseOrderByCell(row);
+
+                row.Cells["UseOrderBy"].ReadOnly = !limitApplies;
+                if (!limitApplies)
+                {
+                    row.Cells["OrderColumn"].ReadOnly = true;
+                    row.Cells["Direction"].ReadOnly = true;
+                    continue;
+                }
+
+                row.Cells["OrderColumn"].ReadOnly = !useOrderBy;
+                row.Cells["Direction"].ReadOnly = !useOrderBy;
             }
 
             UpdateTransferButtonState();
+        }
+
+        private static bool ReadUseOrderByCell(DataGridViewRow row)
+        {
+            var raw = row.Cells["UseOrderBy"].Value;
+            return raw is not bool b || b;
+        }
+
+        private void OrderRulesGridOnCurrentCellDirtyStateChanged(object? sender, EventArgs e)
+        {
+            if (_tableOrderGrid.IsCurrentCellDirty)
+            {
+                _tableOrderGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            }
+
+            UpdateOrderColumnState();
         }
 
         private void UpdateTransferButtonState()
@@ -935,12 +1049,23 @@ namespace banaData
 
         private bool AreAllOrderSelectionsValid()
         {
+            var selectedLimit = _recordLimitComboBox.SelectedItem as ComboBoxItem<TransferRecordLimit>;
+            if (selectedLimit?.Value is TransferRecordLimit.All)
+            {
+                return true;
+            }
+
             foreach (var table in GetSelectedTables())
             {
                 var row = FindOrderRuleRow(table.Name);
                 if (row is null)
                 {
                     return false;
+                }
+
+                if (!ReadUseOrderByCell(row))
+                {
+                    continue;
                 }
 
                 if (string.IsNullOrWhiteSpace(row.Cells["OrderColumn"].Value?.ToString()))
@@ -988,6 +1113,7 @@ namespace banaData
         {
             var rowIndex = _tableOrderGrid.Rows.Add();
             var row = _tableOrderGrid.Rows[rowIndex];
+            row.Cells["UseOrderBy"] = new DataGridViewCheckBoxCell { ThreeState = false, Value = true };
             row.Cells["TableName"].Value = table.Name;
 
             var orderCell = new DataGridViewComboBoxCell { FlatStyle = FlatStyle.Popup };

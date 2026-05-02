@@ -72,6 +72,7 @@ public sealed record TransferOptions(
     string TargetSchema,
     string TableName,
     TransferRecordLimit RecordLimit,
+    bool UseOrderBy,
     string? OrderByColumn,
     SortDirection SortDirection = SortDirection.Descending);
 
