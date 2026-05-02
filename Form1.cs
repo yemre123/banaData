@@ -41,6 +41,7 @@ namespace banaData
         private bool _targetConnectionIsValid;
         private bool _isLoadingSourceTables;
         private bool _isBulkCheckingTables;
+        private int _tableOrderRebuildGeneration;
         private CancellationTokenSource? _transferCancellationTokenSource;
 
         public Form1()
@@ -505,6 +506,7 @@ namespace banaData
 
         private async Task RebuildTableOrderOptionsAsync()
         {
+            var rebuildGeneration = ++_tableOrderRebuildGeneration;
             _tableOrderGrid.Rows.Clear();
             _tableOrderCandidates.Clear();
 
@@ -528,6 +530,11 @@ namespace banaData
                 foreach (var selectedTable in selectedTables)
                 {
                     var columns = await _metadataService.GetColumnsAsync(settings, sourceSchema, selectedTable.Name);
+                    if (rebuildGeneration != _tableOrderRebuildGeneration)
+                    {
+                        return;
+                    }
+
                     var candidates = columns.Where(IsGoodOrderColumnCandidate).ToArray();
 
                     string? defaultOverride = null;
@@ -548,7 +555,17 @@ namespace banaData
             }
             catch (Exception ex)
             {
+                if (rebuildGeneration != _tableOrderRebuildGeneration)
+                {
+                    return;
+                }
+
                 AppendLog($"Kolon bilgileri okunamadı: {ex.Message}");
+            }
+
+            if (rebuildGeneration != _tableOrderRebuildGeneration)
+            {
+                return;
             }
 
             UpdateOrderColumnState();
