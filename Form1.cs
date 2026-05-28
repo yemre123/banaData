@@ -277,6 +277,7 @@ namespace banaData
 
             _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Son 1000 kayıt", TransferRecordLimit.Last1000));
             _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Son 5000 kayıt", TransferRecordLimit.Last5000));
+            _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Son 15000 kayıt", TransferRecordLimit.Last15000));
             _recordLimitComboBox.Items.Add(new ComboBoxItem<TransferRecordLimit>("Tüm kayıtlar", TransferRecordLimit.All));
             _recordLimitComboBox.SelectedIndex = 0;
 

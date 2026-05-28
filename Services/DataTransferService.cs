@@ -305,6 +305,7 @@ public sealed class DataTransferService
         {
             TransferRecordLimit.Last1000 => 1000,
             TransferRecordLimit.Last5000 => 5000,
+            TransferRecordLimit.Last15000 => 15000,
             _ => throw new InvalidOperationException("Bu kayıt limiti için sayı değeri yok.")
         };
     }

@@ -56,6 +56,7 @@ public enum TransferRecordLimit
 {
     Last1000,
     Last5000,
+    Last15000,
     All
 }
 
